@@ -142,6 +142,86 @@ export POSTGRES_DB="${DB_NAME}"
 export POSTGRES_PORT="${DB_PORT}"
 EOF
 
+# Apply schema (idempotent)
+# Note: we intentionally keep schema application here (rather than external tooling)
+# so the DB container always comes up "backend-ready".
+echo "Applying notes app schema (idempotent)..."
+sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} << 'EOF'
+CREATE EXTENSION IF NOT EXISTS citext;
+
+CREATE TABLE IF NOT EXISTS users (
+  id BIGSERIAL PRIMARY KEY,
+  email CITEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx ON users (email);
+CREATE INDEX IF NOT EXISTS users_created_at_idx ON users (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notes (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS notes_user_updated_at_idx ON notes (user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS notes_user_created_at_idx ON notes (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS notes_user_archived_updated_at_idx ON notes (user_id, is_archived, updated_at DESC);
+CREATE INDEX IF NOT EXISTS notes_search_gin_idx
+ON notes
+USING GIN (to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,'')));
+
+CREATE TABLE IF NOT EXISTS tags (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS tags_user_name_unique_idx ON tags (user_id, lower(name));
+CREATE INDEX IF NOT EXISTS tags_user_name_idx ON tags (user_id, lower(name));
+
+CREATE TABLE IF NOT EXISTS note_tags (
+  note_id BIGINT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  tag_id BIGINT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (note_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS note_tags_tag_id_idx ON note_tags (tag_id);
+CREATE INDEX IF NOT EXISTS note_tags_note_id_idx ON note_tags (note_id);
+
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS users_set_updated_at ON users;
+CREATE TRIGGER users_set_updated_at
+BEFORE UPDATE ON users
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS notes_set_updated_at ON notes;
+CREATE TRIGGER notes_set_updated_at
+BEFORE UPDATE ON notes
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS tags_set_updated_at ON tags;
+CREATE TRIGGER tags_set_updated_at
+BEFORE UPDATE ON tags
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+EOF
+echo "✓ Schema ensured."
+
 echo "PostgreSQL setup complete!"
 echo "Database: ${DB_NAME}"
 echo "User: ${DB_USER}"

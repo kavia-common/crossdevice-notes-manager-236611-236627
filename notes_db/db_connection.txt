@@ -1,1 +1,4 @@
+# Notes DB connection command (copy/paste)
+# Contract env vars (provided by this container):
+#   POSTGRES_URL, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, POSTGRES_PORT
 psql postgresql://appuser:dbuser123@localhost:5000/myapp
